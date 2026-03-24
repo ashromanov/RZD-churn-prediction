@@ -1,29 +1,20 @@
-# Импортируем Selenium для парсинга файлов
+import random
+from typing import Sequence
+
+import pandas as pd
 from selenium import webdriver
 from selenium.webdriver.common.by import By
+from selenium.webdriver.support import expected_conditions as ec
 from selenium.webdriver.support.wait import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 
-# Импортируем Pandas для обработки входных данных и формирования результата
-import pandas as pd
+SEARCH_URL_TEMPLATE = "https://market.yandex.ru/search?text={query}"
+PRODUCT_LINKS_SELECTOR = "a[class='EQlfk Gqfzd']"
+PARAMETERS_SELECTOR = "div[class='_2ZKgm']"
+MIN_WAIT_SECONDS = 3
+MAX_WAIT_SECONDS = 5
 
-# Дополнительные модули
-import random
 
-
-def query_to_url(query: str, user_agent: str, all: bool = False):
-    """
-    Функция принимает поисковый запрос (название товара) и
-    возвращает сслыку или список ссылкок на найденные товары.
-
-    :param query: Поисковый запрос
-    :param user_agent: User-agent с которым происходит запрос
-    :param all: Если all = True, возращает все полученные ссылки.
-    """
-
-    url = f"https://market.yandex.ru/search?text={query}"
-
-    # Конструирование профиля для уменьшения вероятности блока
+def _build_driver(user_agent: str) -> webdriver.Firefox:
     profile = webdriver.FirefoxProfile()
     profile.set_preference("general.useragent.override", user_agent)
 
@@ -31,80 +22,74 @@ def query_to_url(query: str, user_agent: str, all: bool = False):
     options.profile = profile
     options.add_argument("--headless=new")
     options.add_argument("--disable-blink-features=AutomationControlled")
-    # Окончание настройки драйвера
+    return webdriver.Firefox(options)
 
-    driver = webdriver.Firefox(options)
-    driver.get(url)
+
+def query_to_urls(query: str, user_agent: str, return_all: bool = False) -> list[str]:
+    search_url = SEARCH_URL_TEMPLATE.format(query=query)
+    driver = _build_driver(user_agent)
+
     try:
-        products = WebDriverWait(driver, random.randint(3, 5)).until(
-            EC.presence_of_all_elements_located((By.CSS_SELECTOR, "a[class='EQlfk Gqfzd']"))
+        driver.get(search_url)
+        products = WebDriverWait(driver, random.randint(MIN_WAIT_SECONDS, MAX_WAIT_SECONDS)).until(
+            ec.presence_of_all_elements_located((By.CSS_SELECTOR, PRODUCT_LINKS_SELECTOR))
         )
-        return [product.get_attribute('href') for product in products][:1]
+        links = [link for product in products if (link := product.get_attribute("href"))]
+        return links if return_all else links[:1]
     except Exception as err:
-        return f"Произошла ошибка - {err}"
+        print(f"Search failed for query '{query}': {err}")
+        return []
     finally:
         driver.quit()
 
 
-def extract_params(query: str, user_agents: list):
-    """
-    Функция принимает поисковый запрос (название товара) и
-    возвращает возможные характеристики.
+def extract_params(query: str, user_agents: Sequence[str]) -> str | None:
+    if not user_agents:
+        print("No user agents provided.")
+        return None
 
-    :param query: Поисковый запрос
-    :param user_agent: Список доступных User-agent
-    """
+    user_agent = random.choice(user_agents)
+    urls = query_to_urls(query=query, user_agent=user_agent)
+    if not urls:
+        print(f"No products found for query: {query}")
+        return None
 
-    user_agent = user_agents[random.randint(0, len(user_agents) - 1)]
-    urls = query_to_url(query, user_agent)
+    driver = _build_driver(user_agent)
+    try:
+        for url in urls:
+            driver.get(url)
+            parameters = WebDriverWait(
+                driver, random.randint(MIN_WAIT_SECONDS, MAX_WAIT_SECONDS)
+            ).until(ec.presence_of_all_elements_located((By.CSS_SELECTOR, PARAMETERS_SELECTOR)))
+            values = [
+                parameter.find_element(By.TAG_NAME, "span").text.strip().lower()
+                for parameter in parameters
+            ]
+            return "|".join(values)
+    except Exception as err:
+        print(f"Failed to parse product parameters for query '{query}': {err}")
+        return None
+    finally:
+        driver.quit()
 
-    if type(urls) == str:
-        print(urls)
-        return
-    elif len(urls) == 0:
-        print("По данному запросу нашлось 0 предметов или возникла непредвиденная ошибка.")
-        return
-
-    # Конструирование профиля для уменьшения вероятности блока
-    profile = webdriver.FirefoxProfile()
-    profile.set_preference("general.useragent.override", user_agent)
-
-    options = webdriver.FirefoxOptions()
-    options.profile = profile
-    options.add_argument("--headless=new")
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    # Окончание настройки драйвера
-
-    driver = webdriver.Firefox(options)
-    for url in urls:
-        driver.get(url)
-        try:
-            parameters = WebDriverWait(driver, random.randint(3, 5)).until(
-                EC.presence_of_all_elements_located((By.CSS_SELECTOR, "div[class='_2ZKgm']"))
-            )
-
-            print('|'.join([parameter.find_element(By.TAG_NAME, 'span').text for parameter in parameters]))
-            return '|'.join([parameter.find_element(By.TAG_NAME, 'span').text.lower().rstrip().lstrip() for parameter in parameters])
-        except Exception as err:
-            return f"Ошибка обработки - {err}"
-        finally:
-            driver.quit()
+    return None
 
 
+def main() -> None:
+    with open("user-agents.txt", "r", encoding="utf-8") as file:
+        user_agents = [ua for ua in file.read().splitlines() if ua]
 
-if __name__=="__main__":
+    data_frame = pd.read_csv("itog_data_from_pars.csv")
+    name_column = "Наименование"
+    params_column = "Параметры"
 
-    # Подготавливаем user-agents, чтобы снизить вероятность блока
-    with open("user-agents.txt", 'r') as file:
-        user_agents = file.read().split("\n")
+    data_frame.loc[:, params_column] = [
+        extract_params(query=str(name), user_agents=user_agents)
+        for name in data_frame[name_column].tolist()
+    ]
+    print(data_frame)
+    data_frame.to_csv("new.csv", index=False)
 
 
-    df = pd.read_csv("itog_data_from_pars.csv")
-    new_column = []
-
-    for name in df["Наименование"].tolist():
-        new_column.append(extract_params(query=name, user_agents=user_agents))
-    
-    df.loc[:, 'Параметры'] = new_column
-    print(df)
-    df.to_csv("new.csv", index=False)
+if __name__ == "__main__":
+    main()
